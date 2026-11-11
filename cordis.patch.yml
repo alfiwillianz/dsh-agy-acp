@@ -1,0 +1,12 @@
+# Bundle patch for dsh-agy-acp: mount the plugin as a profile row.
+#
+# `dsh plugin --profile <name> add ./` (or `/plugin install`) installs the
+# package into the profile and appends it to `dsh.profile.bundles`, because
+# this package.json declares `dsh.bundle.patch`. At boot, app-boot applies the
+# patch over the root composition and the row below mounts the adapter.
+#
+# Tune values by overriding this row's config by id in the profile's own
+# `cordis.patch.yml` user layer — do NOT insert a second same-id row.
+- insert:
+    - id: agy-acp
+      name: 'dsh-agy-acp'
