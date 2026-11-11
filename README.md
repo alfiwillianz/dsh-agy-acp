@@ -222,7 +222,7 @@ Not verified: Windows/macOS, and the dsh TUI model picker end-to-end (the adapte
 bun test
 ```
 
-94 tests against a mock ACP server (`test/mock-agent.ts`, real SDK on the agent side), no Google credentials or network
+98 tests against a mock ACP server (`test/mock-agent.ts`, real SDK on the agent side), no Google credentials or network
 required. Coverage: process startup, initialization, session creation, streaming, tool-call updates, permission
 approval/denial/fail-closed, cancellation (incl. agents that ignore it), unexpected termination + reconnect, malformed
 responses, missing CLI, unsupported ACP command, concurrent sessions, idle shutdown, disposal, model discovery and
