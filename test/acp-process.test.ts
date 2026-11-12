@@ -271,6 +271,30 @@ describe("failure handling", () => {
     expect(again.got.text()).toContain("[echo:recovered]")
   })
 
+  test("loadSession routes replayed history updates to the raw handlers", async () => {
+    const p = make("load-session")
+    const c = collector()
+    const s = await p.loadSession(process.cwd(), "loaded-1", c.handlers)
+    expect(s.sessionId).toBe("loaded-1")
+    expect(s.resumed).toBe(true)
+    expect(c.got.updates.some((u) => u.sessionUpdate === "user_message_chunk")).toBe(true)
+    await s.close()
+  })
+
+  test("a crashed process releases its session ids so session/load can reuse them", async () => {
+    const p = make("crash")
+    const s = await p.openSession(process.cwd(), collector().handlers)
+    const id = s.sessionId
+    await s.prompt("boom").catch(() => {})
+    expect(p.running).toBe(false)
+
+    process.env.MOCK_SCENARIO = "load-session"
+    const loaded = await p.loadSession(process.cwd(), id, collector().handlers)
+    expect(loaded.sessionId).toBe(id)
+    expect(loaded.resumed).toBe(true)
+    await loaded.close()
+  })
+
   test("malformed session/new result is a ProtocolError", async () => {
     const p = make("bad-session")
     const err = await p.openSession(process.cwd(), collector().handlers).catch((e) => e)

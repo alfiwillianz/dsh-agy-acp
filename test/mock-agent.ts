@@ -17,6 +17,11 @@
  *   crash           exit(1) in the middle of a prompt
  *   junk-stdout     emit a non-JSON line on stdout before answering
  *   no-mode         do not offer a `mode` config option (restrictive session mode cannot be enforced)
+ *   load-session    advertise `loadSession` and implement `session/load` (replays a user_message_chunk)
+ *   resume-session  advertise `sessionCapabilities.resume` and implement `session/resume`
+ *   set-mode        implement `session/set_mode`
+ *   permission-after-prompt  send a permission request after the prompt settled (stale-request test)
+ *   hang-once       the first prompt hangs until cancelled; later prompts behave normally
  *   stderr-noise    write diagnostics to stderr
  *   secret-stderr   write a fake bearer token to stderr (redaction test)
  */
@@ -56,7 +61,7 @@ const CONFIG_OPTIONS = [
   },
 ]
 
-const sessions = new Map<string, { cancelled: boolean; config: Record<string, string>; wake?: () => void }>()
+const sessions = new Map<string, { cancelled: boolean; config: Record<string, string>; wake?: () => void; staleOutcome?: string; hungOnce?: boolean }>()
 let counter = 0
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
@@ -69,7 +74,13 @@ const app = acp
     return {
       protocolVersion: acp.PROTOCOL_VERSION,
       agentInfo: { name: "Mock Antigravity", version: "0.0.0-test" },
-      agentCapabilities: { sessionCapabilities: { close: {} } },
+      agentCapabilities: {
+        ...(flags.has("load-session") ? { loadSession: true } : {}),
+        sessionCapabilities: {
+          close: {},
+          ...(flags.has("resume-session") ? { resume: {} } : {}),
+        },
+      },
       authMethods: [{ id: "oauth-personal", name: "Log in with Google" }],
     }
   })
@@ -84,6 +95,27 @@ const app = acp
       models: { availableModels: MODELS, currentModelId: MODELS[0]!.modelId },
       configOptions: CONFIG_OPTIONS,
     } as never
+  })
+  .onRequest(acp.methods.agent.session.load, async (ctx) => {
+    const p = ctx.params as unknown as { sessionId: string; cwd: string }
+    sessions.set(p.sessionId, { cancelled: false, config: {} })
+    await ctx.client.notify(acp.methods.client.session.update, {
+      sessionId: p.sessionId,
+      update: { sessionUpdate: "user_message_chunk", content: { type: "text", text: "replayed history" } },
+    } as never)
+    return {} as never
+  })
+  .onRequest(acp.methods.agent.session.resume, async (ctx) => {
+    const p = ctx.params as unknown as { sessionId: string; cwd: string }
+    sessions.set(p.sessionId, { cancelled: false, config: {} })
+    return {} as never
+  })
+  .onRequest(acp.methods.agent.session.setMode, async (ctx) => {
+    const p = ctx.params as unknown as { sessionId: string; modeId: string }
+    const s = sessions.get(p.sessionId)
+    if (!s) throw new acp.RequestError(-32002, "unknown session")
+    s.config.mode = p.modeId
+    return {} as never
   })
   .onRequest(acp.methods.agent.session.setConfigOption, async (ctx) => {
     const p = ctx.params as unknown as { sessionId: string; configId: string; value: string }
@@ -118,6 +150,15 @@ const app = acp
       await say("partial")
       await sleep(30)
       process.exit(1)
+    }
+    if (flags.has("hang-once") && !s.hungOnce) {
+      s.hungOnce = true
+      await say(`working… [session:${sessionId}]`)
+      await new Promise<void>((resolve) => {
+        s.wake = resolve
+        if (s.cancelled) resolve()
+      })
+      return { stopReason: "cancelled" }
     }
     if (flags.has("hang") || flags.has("ignore-cancel")) {
       await say("working…")
@@ -156,6 +197,25 @@ const app = acp
       return { stopReason: s.cancelled ? "cancelled" : "end_turn" }
     }
 
+    if (flags.has("permission-after-prompt")) {
+      // Send a permission request after this prompt has settled. The client must reject it as stale instead of
+      // asking the user for a turn that is already over.
+      setTimeout(() => {
+        void (async () => {
+          try {
+            const res = (await ctx.client.request(acp.methods.client.session.requestPermission, {
+              sessionId,
+              toolCall: { toolCallId: "tc-stale", title: "Stale write", kind: "edit", locations: [{ path: "/tmp/stale.txt" }] },
+              options: [{ optionId: "allow", name: "Allow once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }],
+            } as never)) as { outcome: { outcome: string; optionId?: string } }
+            s.staleOutcome = res.outcome.outcome === "selected" ? String(res.outcome.optionId) : res.outcome.outcome
+          } catch {
+            s.staleOutcome = "error"
+          }
+        })()
+      }, 50)
+    }
+
     // Default: stream text in chunks, with a thought, and a tool call that completes.
     await say("thinking about it", "agent_thought_chunk")
     await ctx.client.notify(acp.methods.client.session.update, {
@@ -167,7 +227,7 @@ const app = acp
       update: { sessionUpdate: "tool_call_update", toolCallId: "tc-1", status: "completed", content: [{ type: "content", content: { type: "text", text: "{ \"name\": \"x\" }" } }] },
     } as never)
     const model = [s.config.model, s.config.thought_level].filter(Boolean).join("+")
-    for (const part of ["Hello", ", ", "world", `! [echo:${text.slice(0, 40)}]`, model ? ` [model:${model}]` : "", ` [mode:${s.config.mode ?? "unset"}]`]) {
+    for (const part of ["Hello", ", ", "world", `! [echo:${text.slice(0, 80)}]`, model ? ` [model:${model}]` : "", ` [mode:${s.config.mode ?? "unset"}]`, ` [session:${sessionId}]`, s.staleOutcome ? ` [stale:${s.staleOutcome}]` : ""]) {
       if (!part) continue
       await say(part)
       await sleep(5)

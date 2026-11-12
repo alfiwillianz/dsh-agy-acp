@@ -1,6 +1,8 @@
 import { spawn, type ChildProcess } from 'node:child_process'
 import { Readable, Writable } from 'node:stream'
 import * as acp from '@agentclientprotocol/sdk'
+import type { AcpCapabilities } from './backend.js'
+import { EMPTY_CAPABILITIES } from './backend.js'
 import type { AgyConfig } from './config.js'
 import {
   AgyError,
@@ -34,6 +36,7 @@ export interface PermissionRequest {
     readonly toolCallId?: string
     readonly kind?: string | null
     readonly title?: string | null
+    readonly name?: string | null
     readonly locations?: ReadonlyArray<{ path?: string }> | null
     readonly rawInput?: unknown
   }
@@ -52,6 +55,47 @@ const CLIENT_INFO = { name: 'dsh-agy-acp', version: '0.1.0' } as const
 const CANCEL_GRACE_MS = 5_000
 const KILL_GRACE_MS = 2_000
 const AUTH_REQUIRED_CODE = -32000
+
+/**
+ * Client capabilities we advertise. Deliberately minimal:
+ *  - no `fs` and no `terminal`: the agent runs its own tools and asks us for permission instead;
+ *  - `session.notices` and `session.compaction` so a newer agent may send those structured updates;
+ *  - boolean config options so a newer agent may advertise them.
+ * Advertising a capability is a promise to handle the corresponding requests/notifications; we handle the
+ * session-scoped ones and reject unknown agent->client requests explicitly.
+ */
+const CLIENT_CAPABILITIES = {
+  session: { notices: {}, compaction: {}, configOptions: { boolean: {} } },
+} as const
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === 'object' && value !== null ? (value as Record<string, unknown>) : undefined
+}
+
+/** Normalize the agent's `initialize` capabilities. Anything not explicitly `true`/present is unsupported. */
+export function normalizeCapabilities(initializeResult: Record<string, unknown>): AcpCapabilities {
+  const caps = asRecord(initializeResult.agentCapabilities) ?? {}
+  const prompt = asRecord(caps.promptCapabilities) ?? {}
+  const session = asRecord(caps.sessionCapabilities) ?? {}
+  const mcp = asRecord(caps.mcpCapabilities) ?? {}
+  return {
+    protocolVersion: typeof initializeResult.protocolVersion === 'number' ? initializeResult.protocolVersion : 0,
+    prompt: {
+      image: prompt.image === true,
+      audio: prompt.audio === true,
+      embeddedContext: prompt.embeddedContext === true,
+    },
+    session: {
+      load: caps.loadSession === true,
+      resume: session.resume != null,
+      close: session.close != null,
+      list: session.list != null,
+      delete: session.delete != null,
+    },
+    mcp: { http: mcp.http === true, sse: mcp.sse === true },
+    raw: caps,
+  }
+}
 
 /** Children we spawned and have not seen exit, so a hard process exit can't orphan them. */
 const liveChildren = new Set<ChildProcess>()
@@ -82,12 +126,24 @@ interface Connection {
   initializeResult: Record<string, unknown>
 }
 
+/**
+ * One in-flight prompt. Permission waits belong to the prompt, not the session, so a persistent session can be
+ * reused after a cancelled turn without inheriting an already-aborted permission signal.
+ */
+interface ActivePrompt {
+  readonly permissionAbort: AbortController
+  /** Set once the caller (or a timeout) asked to cancel; used to map the JSON-RPC abort error to `cancelled`. */
+  cancelled: boolean
+  /** Releases the prompt wait after the cancel grace period when the agent ignores `session/cancel`. */
+  cancel: () => void
+}
+
 interface SessionEntry {
   handlers: SessionHandlers
-  /** Aborted when the process dies or the session is cancelled, to release pending permission waits. */
-  readonly permissionAbort: AbortController
   activity: () => void
   pauseActivity: () => () => void
+  /** Present only while a prompt is active; stale permission requests are rejected. */
+  activePrompt?: ActivePrompt | undefined
 }
 
 export class AcpProcess {
@@ -99,6 +155,8 @@ export class AcpProcess {
   #disposed = false
   #idleTimer: ReturnType<typeof setTimeout> | undefined
   #generation = 0
+  /** Last negotiated capabilities, retained across idle stops so model metadata stays accurate. */
+  #capabilities: AcpCapabilities = EMPTY_CAPABILITIES
 
   constructor(config: AgyConfig, log: Logger) {
     this.#config = config
@@ -113,6 +171,15 @@ export class AcpProcess {
   }
   get running(): boolean {
     return this.#connection !== undefined && !this.#connection.exited
+  }
+
+  /**
+   * Capabilities advertised by the current ACP server. Before the first successful `initialize` every optional
+   * feature is negative, which is the safe default for capability-gated operations (`session/load`, images, …).
+   */
+  get capabilities(): AcpCapabilities {
+    const init = this.#connection?.initializeResult
+    return init === undefined ? this.#capabilities : normalizeCapabilities(init)
   }
 
   /* ----------------------------------------------------------------------------------------------- lifecycle */
@@ -171,7 +238,19 @@ export class AcpProcess {
       else this.#log.warn('process terminated', { detail })
       rejectDied(err)
       // Release anything waiting on the user for this dead process, and tell sessions it is over.
-      for (const entry of this.#sessions.values()) entry.permissionAbort.abort(err)
+      for (const entry of this.#sessions.values()) entry.activePrompt?.permissionAbort.abort(err)
+      // The dead process owns no live ACP sessions. Clearing them lets a later `session/load` / `session/resume`
+      // attempt reuse the same id on the restarted process instead of being rejected as "already active".
+      this.#sessions.clear()
+      // If the connection died but the child is still alive, do not orphan it. Intentional stop/dispose paths set
+      // `stopping`/`disposed` and handle termination themselves.
+      if (!this.#disposed && state.stopping !== true) {
+        try {
+          child.kill('SIGTERM')
+        } catch {
+          /* already gone */
+        }
+      }
       if (this.#generation === generation && this.#connection === state) this.#connection = undefined
     }
 
@@ -244,7 +323,7 @@ export class AcpProcess {
         state.conn.agent.request(acp.methods.agent.initialize, {
           protocolVersion: acp.PROTOCOL_VERSION,
           // No fs / terminal capabilities: Antigravity uses its own tools and asks us for permission instead.
-          clientCapabilities: {},
+          clientCapabilities: CLIENT_CAPABILITIES,
           clientInfo: CLIENT_INFO,
         }),
         died,
@@ -260,6 +339,7 @@ export class AcpProcess {
         )
       }
       state.initializeResult = init
+      this.#capabilities = normalizeCapabilities(init)
       this.#connection = state
       this.#log.debug('initialized', { agentInfo: (init as { agentInfo?: unknown }).agentInfo })
       return state
@@ -345,6 +425,10 @@ export class AcpProcess {
     this.#clearIdle()
     const conn = this.#connection
     this.#connection = undefined
+    // A stopped process owns no live ACP sessions. Release waiters and forget the entries so the next use starts
+    // from a clean slate (the continuity layer will recreate or resume its sessions).
+    for (const entry of this.#sessions.values()) entry.activePrompt?.permissionAbort.abort(new CancelledError())
+    this.#sessions.clear()
     if (conn) await this.#kill(conn)
   }
 
@@ -354,7 +438,7 @@ export class AcpProcess {
     this.#disposed = true
     this.#clearIdle()
     for (const [id, entry] of this.#sessions) {
-      entry.permissionAbort.abort(new CancelledError())
+      entry.activePrompt?.permissionAbort.abort(new CancelledError())
       void this.#connection?.conn.agent
         .notify(acp.methods.agent.session.cancel, { sessionId: id })
         .catch(() => {})
@@ -395,13 +479,19 @@ export class AcpProcess {
       optionKinds: (params.options as Array<{ kind: string }>).map((o) => o.kind),
       knownSession: entry !== undefined,
     })
-    // Fail closed: an unknown session, or no resolver, never auto-approves.
+    // Fail closed: an unknown session, no active prompt, or no resolver never auto-approves. A request that
+    // arrives after its prompt settled is stale; answering it could authorize work the user never saw.
     if (!entry) return { outcome: { outcome: 'cancelled' } }
+    const prompt = entry.activePrompt
+    if (prompt === undefined || prompt.cancelled) {
+      this.#log.debug('rejecting a stale permission request', { acpSession: params.sessionId })
+      return { outcome: { outcome: 'cancelled' } }
+    }
     const resume = entry.pauseActivity() // waiting on a human must not trip the inactivity timeout
     const merged = new AbortController()
     const abort = () => merged.abort()
     signal.addEventListener('abort', abort, { once: true })
-    entry.permissionAbort.signal.addEventListener('abort', abort, { once: true })
+    prompt.permissionAbort.signal.addEventListener('abort', abort, { once: true })
     try {
       const outcome = await entry.handlers.onPermission(
         {
@@ -411,14 +501,18 @@ export class AcpProcess {
         },
         merged.signal,
       )
-      if (merged.signal.aborted) return { outcome: { outcome: 'cancelled' } }
+      // The prompt may have ended (or been replaced) while the user was deciding. Never apply a decision to a
+      // different turn than the one that asked.
+      if (merged.signal.aborted || prompt.cancelled || entry.activePrompt !== prompt) {
+        return { outcome: { outcome: 'cancelled' } }
+      }
       return { outcome } as acp.RequestPermissionResponse
     } catch (e) {
       this.#log.warn('permission resolver failed; cancelling', { message: (e as Error)?.message })
       return { outcome: { outcome: 'cancelled' } }
     } finally {
       signal.removeEventListener('abort', abort)
-      entry.permissionAbort.signal.removeEventListener('abort', abort)
+      prompt.permissionAbort.signal.removeEventListener('abort', abort)
       resume()
     }
   }
@@ -435,11 +529,84 @@ export class AcpProcess {
       throw new ProtocolError('session/new returned a malformed response (missing sessionId)')
     }
     const sessionId = res.sessionId
+    const { entry, probe } = this.#registerSession(handlers)
+    this.#sessions.set(sessionId, entry)
+    this.#clearIdle()
+    return new AcpSession(this, state, sessionId, res, entry, probe, false)
+  }
+
+  /**
+   * Restore a persisted ACP session with `session/load` (the agent replays prior updates through the handlers).
+   * Only available when the agent advertised the top-level `loadSession` capability.
+   */
+  async loadSession(cwd: string, sessionId: string, handlers: SessionHandlers): Promise<AcpSession> {
+    const state = await this.#ensure()
+    if (!this.capabilities.session.load) {
+      throw new UnsupportedAcpError('the agent does not advertise the `loadSession` capability')
+    }
+    return this.#restoreSession(state, cwd, sessionId, handlers, 'session/load', () =>
+      state.conn.agent.request(acp.methods.agent.session.load, {
+        cwd,
+        mcpServers: [],
+        sessionId,
+      } as never),
+    )
+  }
+
+  /**
+   * Restore a persisted ACP session with `session/resume` (no history replay). Only available when the agent
+   * advertised `sessionCapabilities.resume`.
+   */
+  async resumeSession(cwd: string, sessionId: string, handlers: SessionHandlers): Promise<AcpSession> {
+    const state = await this.#ensure()
+    if (!this.capabilities.session.resume) {
+      throw new UnsupportedAcpError('the agent does not advertise the `session/resume` capability')
+    }
+    return this.#restoreSession(state, cwd, sessionId, handlers, 'session/resume', () =>
+      state.conn.agent.request(acp.methods.agent.session.resume, {
+        cwd,
+        mcpServers: [],
+        sessionId,
+      } as never),
+    )
+  }
+
+  async #restoreSession(
+    state: Connection,
+    cwd: string,
+    sessionId: string,
+    handlers: SessionHandlers,
+    what: string,
+    run: () => Promise<unknown>,
+  ): Promise<AcpSession> {
+    if (sessionId === '') throw new ProtocolError(`${what} requires a non-empty session id`)
+    if (this.#sessions.has(sessionId)) {
+      throw new ProtocolError(`ACP session "${sessionId}" is already active in this process`)
+    }
+    const { entry, probe } = this.#registerSession(handlers)
+    // Register before the request: `session/load` replays prior updates as notifications, and they must reach
+    // this session's handlers rather than being dropped as an unknown session.
+    this.#sessions.set(sessionId, entry)
+    this.#clearIdle()
+    try {
+      const res = (await this.#request(state, what, run)) as Record<string, unknown> | undefined
+      return new AcpSession(this, state, sessionId, res ?? {}, entry, probe, true)
+    } catch (e) {
+      this.#sessions.delete(sessionId)
+      entry.activePrompt?.permissionAbort.abort(new CancelledError())
+      this.#maybeScheduleIdle()
+      throw e
+    }
+  }
+
+  #registerSession(handlers: SessionHandlers): {
+    entry: SessionEntry
+    probe: () => { lastActivity: number; paused: number }
+  } {
     let lastActivity = Date.now()
     let paused = 0
     const entry: SessionEntry = {
       handlers,
-      permissionAbort: new AbortController(),
       activity: () => {
         lastActivity = Date.now()
       },
@@ -451,9 +618,7 @@ export class AcpProcess {
         }
       },
     }
-    this.#sessions.set(sessionId, entry)
-    this.#clearIdle()
-    return new AcpSession(this, state, sessionId, res, entry, () => ({ lastActivity, paused }))
+    return { entry, probe: () => ({ lastActivity, paused }) }
   }
 
   /** @internal */
@@ -522,15 +687,23 @@ export class AcpProcess {
 
 export class AcpSession {
   #closed = false
+  #activePrompt: ActivePrompt | undefined
+
   constructor(
     private readonly proc: AcpProcess,
     private readonly state: Connection,
     readonly sessionId: string,
-    /** The raw `session/new` response (models, modes, configOptions). */
+    /** The raw `session/new`, `session/load`, or `session/resume` response. */
     readonly response: Record<string, unknown>,
     private readonly entry: SessionEntry,
     private readonly activityProbe: () => { lastActivity: number; paused: number },
+    /** True when the session was restored rather than freshly created. */
+    readonly resumed: boolean = false,
   ) {}
+
+  get closed(): boolean {
+    return this.#closed
+  }
 
   async setConfigOption(configId: string, value: string): Promise<void> {
     await this.proc._request(this.state, 'session/set_config_option', () =>
@@ -542,14 +715,30 @@ export class AcpSession {
     )
   }
 
+  /** Apply one standard `session/set_mode` value (used when a resumed session returns no config options). */
+  async setMode(modeId: string): Promise<void> {
+    await this.proc._request(this.state, 'session/set_mode', () =>
+      this.state.conn.agent.request(acp.methods.agent.session.setMode, {
+        sessionId: this.sessionId,
+        modeId,
+      } as never),
+    )
+  }
+
   /**
    * Run one prompt turn. Resolves with the stop reason (`cancelled` when `signal` aborts).
-   * Streaming updates and permission requests are delivered through the handlers given to `openSession`.
+   * Streaming updates and permission requests are delivered through the handlers given to the opener.
+   *
+   * `content` accepts a plain string for backwards compatibility, or the full ACP content-block array (text,
+   * images, resources) when the caller has negotiated the corresponding capability.
    */
-  async prompt(text: string, signal?: AbortSignal): Promise<StopReason> {
+  async prompt(content: string | readonly acp.ContentBlock[], signal?: AbortSignal): Promise<StopReason> {
+    if (this.#closed) throw new ProtocolError('cannot prompt a closed ACP session')
+    if (this.#activePrompt !== undefined) {
+      throw new ProtocolError('another prompt is already active on this ACP session')
+    }
     const { conn } = this.state
     const idleMs = this.proc._config.requestTimeoutMs
-    let cancelled = false
     let timedOut = false
     let graceTimer: ReturnType<typeof setTimeout> | undefined
     let idleTimer: ReturnType<typeof setInterval> | undefined
@@ -560,14 +749,22 @@ export class AcpSession {
     })
     early.catch(() => {})
 
+    const promptState: ActivePrompt = {
+      permissionAbort: new AbortController(),
+      cancelled: false,
+      cancel: () => {},
+    }
     const cancel = () => {
-      if (cancelled) return
-      cancelled = true
-      this.entry.permissionAbort.abort(new CancelledError()) // release any pending approval immediately
+      if (promptState.cancelled) return
+      promptState.cancelled = true
+      promptState.permissionAbort.abort(new CancelledError()) // release any pending approval immediately
       void conn.agent.notify(acp.methods.agent.session.cancel, { sessionId: this.sessionId }).catch(() => {})
       // A well-behaved agent answers the prompt with stopReason "cancelled". If it does not, stop waiting.
       graceTimer = setTimeout(() => rejectEarly(new CancelledError()), CANCEL_GRACE_MS)
     }
+    promptState.cancel = cancel
+    this.#activePrompt = promptState
+    this.entry.activePrompt = promptState
 
     const onAbort = () => cancel()
     if (signal?.aborted) {
@@ -580,7 +777,7 @@ export class AcpSession {
     idleTimer = setInterval(
       () => {
         const { lastActivity, paused } = this.activityProbe()
-        if (paused === 0 && !cancelled && Date.now() - lastActivity > idleMs) {
+        if (paused === 0 && !promptState.cancelled && Date.now() - lastActivity > idleMs) {
           timedOut = true
           cancel()
           clearTimeout(graceTimer)
@@ -591,11 +788,24 @@ export class AcpSession {
     )
     this.entry.activity()
 
+    // An already-aborted caller must not send a prompt at all; `cancel()` above already notified the agent and
+    // armed the grace timer, so release our state and return without waiting for a turn that was never requested.
+    if (signal?.aborted === true) {
+      clearInterval(idleTimer)
+      clearTimeout(graceTimer)
+      signal.removeEventListener('abort', onAbort)
+      promptState.permissionAbort.abort(new CancelledError())
+      if (this.#activePrompt === promptState) this.#activePrompt = undefined
+      if (this.entry.activePrompt === promptState) this.entry.activePrompt = undefined
+      return 'cancelled'
+    }
+
+    const prompt = typeof content === 'string' ? [{ type: 'text' as const, text: content }] : [...content]
     try {
       const response = (await Promise.race([
         conn.agent.request(acp.methods.agent.session.prompt, {
           sessionId: this.sessionId,
-          prompt: [{ type: 'text', text }],
+          prompt,
         }),
         this.state.died,
         early,
@@ -606,7 +816,7 @@ export class AcpSession {
       if (timedOut) throw new RequestTimeoutError('session/prompt', idleMs)
       return response.stopReason as StopReason
     } catch (e) {
-      if (cancelled && !timedOut && (e instanceof CancelledError || (e as { code?: number })?.code === -32800)) {
+      if (promptState.cancelled && !timedOut && (e instanceof CancelledError || (e as { code?: number })?.code === -32800)) {
         return 'cancelled'
       }
       throw await this.proc._mapRpcError(e, this.state)
@@ -614,20 +824,35 @@ export class AcpSession {
       signal?.removeEventListener('abort', onAbort)
       clearInterval(idleTimer)
       clearTimeout(graceTimer)
+      // Release any permission waiter and detach the prompt so a late request is rejected as stale.
+      promptState.permissionAbort.abort(new CancelledError())
+      if (this.#activePrompt === promptState) this.#activePrompt = undefined
+      if (this.entry.activePrompt === promptState) this.entry.activePrompt = undefined
     }
+  }
+
+  /**
+   * Ask the agent to cancel the active prompt without closing the session. The prompt's own abort path performs
+   * the same work; this is for callers that hold a session handle rather than the prompt's signal.
+   */
+  cancel(): void {
+    this.#activePrompt?.cancel()
   }
 
   /** Release the ACP session on the agent (best effort) and stop routing its updates. Idempotent. */
   async close(): Promise<void> {
     if (this.#closed) return
     this.#closed = true
-    this.entry.permissionAbort.abort(new CancelledError())
+    // Ask the agent to stop any active work before releasing the session (ACP `session/close` also requires this,
+    // and agents that do not implement close still get the cancel notification).
+    this.#activePrompt?.cancel()
+    this.#activePrompt?.permissionAbort.abort(new CancelledError())
+    this.#activePrompt = undefined
+    this.entry.activePrompt = undefined
     this.proc._releaseSession(this.sessionId)
     if (this.state.exited) return
     try {
-      const caps = (this.state.initializeResult as { agentCapabilities?: { sessionCapabilities?: { close?: unknown } } })
-        .agentCapabilities?.sessionCapabilities
-      if (caps?.close !== undefined) {
+      if (this.proc.capabilities.session.close) {
         await Promise.race([
           this.state.conn.agent.request(acp.methods.agent.session.close, { sessionId: this.sessionId }),
           this.state.died,
