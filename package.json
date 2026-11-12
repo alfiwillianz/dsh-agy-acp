@@ -1,7 +1,7 @@
 {
   "name": "dsh-agy-acp",
-  "version": "0.1.0",
-  "description": "dsh plugin that exposes Google Antigravity's Gemini models through the official `agy acp` server (Agent Client Protocol). Experimental.",
+  "version": "0.2.0",
+  "description": "dsh plugin that exposes Google Antigravity's Gemini models through the official `agy acp` server (Agent Client Protocol), with persistent ACP sessions and a generic ACP backend boundary. Experimental.",
   "type": "module",
   "main": "lib/types/index.js",
   "types": "lib/types/index.d.ts",
@@ -18,7 +18,9 @@
     "cordis.patch.yml",
     "dsh-plugin.json",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "ARCHITECTURE.md",
+    "SECURITY_AUDIT.md"
   ],
   "engines": {
     "node": "^22.19 || >=24"
@@ -35,7 +37,9 @@
     "agy",
     "acp",
     "gemini",
-    "llm"
+    "llm",
+    "acp-backend",
+    "session-continuity"
   ],
   "license": "MIT",
   "dsh": {

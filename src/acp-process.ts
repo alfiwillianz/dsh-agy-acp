@@ -51,7 +51,7 @@ export interface SessionHandlers {
 
 export type StopReason = 'end_turn' | 'max_tokens' | 'max_turn_requests' | 'refusal' | 'cancelled'
 
-const CLIENT_INFO = { name: 'dsh-agy-acp', version: '0.1.0' } as const
+const CLIENT_INFO = { name: 'dsh-agy-acp', version: '0.2.0' } as const
 const CANCEL_GRACE_MS = 5_000
 const KILL_GRACE_MS = 2_000
 const AUTH_REQUIRED_CODE = -32000

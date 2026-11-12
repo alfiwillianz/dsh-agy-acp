@@ -2,7 +2,7 @@
   "$schema": "https://dsh.community/schemas/dsh-plugin-0.15.json",
   "id": "dsh-agy-acp",
   "name": "dsh-agy-acp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "manifestVersion": "0.15",
   "facets": {
     "host": {
