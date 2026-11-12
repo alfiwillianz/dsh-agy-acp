@@ -9,6 +9,11 @@ every filesystem / environment / network / process API, (3) live experiments aga
 credentials, implements OAuth, proxies any API, or contacts any network endpoint. Every keyword hit below is either a
 *defensive* control (rejecting or redacting), a test of that control, or the name of an unrelated field.
 
+The persistent-session and multimodal changes do not add a network or credential path. They add: an in-memory map
+from dsh session id to ACP session, capability-gated `session/load` / `session/resume`, optional reads from dsh's
+attachment store (`ctx.attachments`), and structured `plugin:agy-acp/*` records in the dsh session log. Each is
+described below.
+
 ## 1. Keyword search — every occurrence explained
 
 | Term | Occurrences | Explanation |
@@ -30,17 +35,23 @@ credentials, implements OAuth, proxies any API, or contacts any network endpoint
 
 | Capability | Result |
 |---|---|
-| Filesystem | One write: `appendFileSync` in `src/log.ts`, to the log file the **user** configured (or stderr). No reads, no directory listing, no home-directory lookups. `process.cwd()` is used only as the ACP session's working directory when no live dsh agent provides one. |
+| Filesystem | One direct write: `appendFileSync` in `src/log.ts`, to the log file the **user** configured (or stderr). `src/attachments.ts` reads attachment bytes through the composed `ctx.attachments` service (`readImage`, `readFileStream`, `fileHostPath`) — it does not open files itself. `process.cwd()` is used only as the ACP session's working directory when no live dsh agent provides one. |
 | Environment | No `process.env` access. (The child inherits dsh's environment by Node's default; the plugin neither reads nor alters it. See residual risk F2.) |
-| Network | No `fetch`, `http(s)`, `net`, `tls`, WebSocket or socket code. The plugin's only I/O is the child's stdin/stdout/stderr. |
+| Network | No `fetch`, `http(s)`, `net`, `tls`, WebSocket or socket code. The plugin's only I/O is the child's stdin/stdout/stderr and the optional attachment service. |
 | Processes | One `spawn(command, args)` in `src/acp-process.ts` — the configured Antigravity CLI. No shell (`shell` option is not set), no `exec`. |
 | Protocol | All JSON-RPC framing is `@agentclientprotocol/sdk` (`ndJsonStream`). stdout is the protocol channel and is never logged to; stderr is drained separately and goes only to the logger (credential- and email-redacted). |
+| Session continuity | One in-memory ACP session per dsh session. It sends only the new tail; divergence triggers a fresh session + replay. `session/load` / `session/resume` are attempted only when the agent advertises the capability. No credential or environment data is added to prompts. |
+| Structured records | `src/records.ts` appends `plugin:agy-acp/session`, `plugin:agy-acp/tool`, and `plugin:agy-acp/update` records through dsh's documented `appendPluginRecord`. They are non-surface and ignorable. They contain ACP session ids, tool ids/titles/kinds, paths/commands the agent itself reported, and status/output text — the same metadata the plugin already logs in debug mode. They do not contain prompt text or credentials. |
 | `agy -p` / headless | Not used anywhere. |
 | Authentication calls | `authenticate` / `logout` / `--login` are never invoked; `--login` is a rejected argument. On "auth required" the plugin only tells the user to log in with the CLI. |
-| dsh approval | The plugin calls `ctx.approval.request` with a tool name and a reason. It never grants an approval itself; a missing agent, missing seam, error, or cancellation denies. |
-| Dependencies | Runtime: `@agentclientprotocol/sdk` 2.4.0 and `@deepseek-ai/schemastery` ~3.19.0. The dsh packages are peer dependencies supplied by the host. |
+| dsh approval | The plugin calls `ctx.approval.request` with a tool name, reason, and (when available) the ACP tool-call id. It never grants an approval itself; a missing agent, missing seam, error, cancellation, or stale request denies. `permissionMode: "reject"` denies without asking. |
+| Dependencies | Runtime: `@agentclientprotocol/sdk` 2.4.0 and `@deepseek-ai/schemastery` ~3.19.0. The dsh packages are peer dependencies supplied by the host; `@deepseek-ai/dsh-attachment` is optional and accessed structurally. |
 
-## 3. Behaviour verified on the real system
+## 3. Behaviour verified (live or by test)
+
+The first rows were verified live against `agy` 1.5.3 and dsh 0.2.2-rc.1 before the persistent-session change. Rows
+marked "verified by test" were added with the new backend/continuity/permission tests and have not yet been re-run
+against a live `agy`; re-run `bun scripts/live-prompt.mjs` twice in one dsh session to exercise the persistent path.
 
 | Check | Outcome |
 |---|---|
@@ -50,6 +61,8 @@ credentials, implements OAuth, proxies any API, or contacts any network endpoint
 | dsh approval allowed | ACP `session/request_permission` was forwarded to `ctx.approval.request`; `allowed-once` selected `allow_once`. |
 | dsh approval denied | A rejection selected `reject_once`; the tool call failed. |
 | No approval seam / no live agent / throwing approval | All fail closed (`reject_once` or `cancelled`). |
+| `permissionMode: "reject"` | Denies without calling `ctx.approval.request` (verified by test). |
+| Stale permission after the prompt settled | Rejected as `cancelled`; never shown to the user (verified by test). |
 | After runs | No `agy acp` process left running. |
 
 ## 4. Findings and residual risks
@@ -72,7 +85,8 @@ mode; it is credential- and email-redacted, but may still contain local paths.
 
 **F4 — Approval needs a live dsh agent.** dsh's approval service requires an open turn and a live agent. A model call
 that is not attributable to an agent (for example, an auxiliary title-generation request with no session identity)
-fails closed if Antigravity asks for permission during it. This is a denial, not an escalation.
+fails closed if Antigravity asks for permission during it. This is a denial, not an escalation. A permission request
+that arrives after its prompt settled is likewise rejected as stale.
 
 **F5 — Experimental integration.** The dsh `LlmAdapter` contract is public, but this plugin is young. A future dsh
 release could change the adapter contract; the failure mode is "provider does not load", not a security downgrade.
@@ -80,6 +94,26 @@ Pin versions and re-test on upgrade.
 
 **F6 — Not a statement of Google approval.** ACP is a documented interface of the official CLI; whether third-party
 clients are permitted under your account terms is a policy question this audit does not answer.
+
+**F7 — ACP permissions are not a sandbox.** `session/request_permission` only governs operations the agent chooses to
+route through it. The plugin cannot enumerate or block operations the agent performs silently. This is why
+`sessionMode: "plan"` remains the default and why the audit does not claim the integration is confined. Consider
+`--sandbox` in `args` (a documented `agy acp` flag) and OS-level confinement for defence in depth.
+
+**F8 — Persistent sessions retain context.** With `sessionContinuity: true`, the ACP agent keeps the conversation
+context across turns, which is the point of the feature. A divergence (compaction, fork, retry, rewritten assistant
+message) causes the plugin to replay the conversation into a fresh ACP session, so the agent may see the history
+again. No additional data is sent beyond the conversation dsh already holds.
+
+**F9 — Attachments are sent to the agent.** When `imageInput` is enabled and the agent advertises image prompts,
+image bytes from dsh's attachment store are base64-encoded into the ACP prompt. Files are sent as `resource_link`
+URIs or embedded text. This is the user's own content and is necessary for multimodal input; it is not read from
+any path the plugin chooses.
+
+**F10 — Structured records contain agent-reported metadata.** `plugin:agy-acp/tool` records include tool titles,
+kinds, paths, commands, and output text reported by the agent. They live in the dsh session log and inherit its
+access controls. They never contain prompt text or credentials. If a session log is shared, treat these records like
+the transcript itself.
 
 ## 5. Reproduce
 
