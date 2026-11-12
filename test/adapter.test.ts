@@ -33,6 +33,8 @@ afterEach(async () => {
   await Promise.all(procs.splice(0).map((p) => p.dispose()))
 })
 
+const user = (text: string) => ({ role: 'user' as const, content: [{ type: 'text' as const, text }] })
+
 function opts(overrides: Record<string, unknown> = {}): GenerateOptions {
   return {
     provider: 'antigravity',
@@ -268,5 +270,150 @@ describe('permissions', () => {
     })
     const { text } = await collect(adapter.stream(opts({ sessionId: 's' })))
     expect(text).toContain('permission:reject')
+  })
+
+  test('permissionMode reject denies without asking dsh at all', async () => {
+    let asked = 0
+    const { adapter } = makeAdapter('permission', { permissionMode: 'reject', structuredEvents: false }, {
+      ...services('allowed-once'),
+      approval: {
+        request: async () => {
+          asked++
+          return 'allowed-once'
+        },
+      },
+    })
+    const { text } = await collect(adapter.stream(opts({ sessionId: 's' })))
+    expect(asked).toBe(0)
+    expect(text).toContain('permission:reject')
+  })
+
+  test('the ACP tool-call id is forwarded to the approval request', async () => {
+    const requests: Array<{ callId?: string }> = []
+    const { adapter } = makeAdapter('permission', { structuredEvents: false }, {
+      ...services('allowed-once'),
+      approval: {
+        request: async (req) => {
+          requests.push(req as { callId?: string })
+          return 'allowed-once'
+        },
+      },
+    })
+    await collect(adapter.stream(opts({ sessionId: 's' })))
+    expect(requests).toHaveLength(1)
+    expect(requests[0]!.callId).toBe('tc-w')
+  })
+
+  test('a permission request that arrives after its prompt is rejected as stale', async () => {
+    const { adapter } = makeAdapter('permission-after-prompt', { structuredEvents: false }, services('allowed-once'))
+    const first = await collect(adapter.stream(opts({ sessionId: 's', messages: [user('one')] })))
+    expect(first.text).toContain('Hello, world!')
+    // Give the mock time to send the stale request and record the client's answer.
+    await Bun.sleep(150)
+    const second = await collect(
+      adapter.stream(
+        opts({
+          sessionId: 's',
+          messages: [user('one'), { role: 'assistant', content: [{ type: 'text', text: first.text }] }, user('two')],
+        }),
+      ),
+    )
+    expect(second.text).toContain('[stale:cancelled]')
+  })
+})
+
+describe('session continuity (integration)', () => {
+  const fakeSessionServices: FakeServices = {
+    agents: { get: () => ({ id: 's', session: { id: 's' } }) },
+    workingDirectory: { get: () => process.cwd() },
+  }
+  const sessionIdOf = (text: string): string | undefined => text.match(/\[session:([^\]]+)\]/)?.[1]
+
+  test('streams reasoning in the persistent path', async () => {
+    const { adapter } = makeAdapter('', { structuredEvents: false }, fakeSessionServices)
+    const { reasoning, text } = await collect(adapter.stream(opts({ sessionId: 's', messages: [user('first')] })))
+    expect(reasoning).toContain('thinking about it')
+    expect(text).toContain('[echo:first]')
+  })
+
+  test('reuses the ACP session and sends only the new user message', async () => {
+    const { adapter } = makeAdapter('', { structuredEvents: false }, fakeSessionServices)
+    const first = await collect(adapter.stream(opts({ sessionId: 's', messages: [user('first')] })))
+    expect(first.text).toContain('[echo:first]')
+    const acpSession = sessionIdOf(first.text)
+    expect(acpSession).toBeDefined()
+
+    const second = await collect(
+      adapter.stream(
+        opts({
+          sessionId: 's',
+          messages: [user('first'), { role: 'assistant', content: [{ type: 'text', text: first.text }] }, user('second')],
+        }),
+      ),
+    )
+    expect(second.text).toContain('[echo:second]')
+    expect(second.text).not.toContain('<conversation_so_far>')
+    expect(sessionIdOf(second.text)).toBe(acpSession)
+  })
+
+  test('replays from scratch when the recorded assistant message was rewritten', async () => {
+    const { adapter } = makeAdapter('', { structuredEvents: false }, fakeSessionServices)
+    const first = await collect(adapter.stream(opts({ sessionId: 's', messages: [user('first')] })))
+    const second = await collect(
+      adapter.stream(
+        opts({
+          sessionId: 's',
+          messages: [user('first'), { role: 'assistant', content: [{ type: 'text', text: 'rewritten' }] }, user('second')],
+        }),
+      ),
+    )
+    expect(second.text).toContain('<conversation_so_far>')
+    expect(sessionIdOf(second.text)).not.toBe(sessionIdOf(first.text))
+  })
+
+  test('two dsh sessions use two ACP sessions', async () => {
+    const { adapter } = makeAdapter('', { structuredEvents: false }, fakeSessionServices)
+    const [a, b] = await Promise.all([
+      collect(adapter.stream(opts({ sessionId: 'a', messages: [user('alpha')] }))),
+      collect(adapter.stream(opts({ sessionId: 'b', messages: [user('bravo')] }))),
+    ])
+    expect(a.text).toContain('[echo:alpha]')
+    expect(b.text).toContain('[echo:bravo]')
+    expect(sessionIdOf(a.text)).not.toBe(sessionIdOf(b.text))
+  })
+
+  test('sessionContinuity: false creates a fresh ACP session per call', async () => {
+    const { adapter } = makeAdapter('', { structuredEvents: false, sessionContinuity: false }, fakeSessionServices)
+    const first = await collect(adapter.stream(opts({ sessionId: 's', messages: [user('first')] })))
+    const second = await collect(
+      adapter.stream(
+        opts({
+          sessionId: 's',
+          messages: [user('first'), { role: 'assistant', content: [{ type: 'text', text: first.text }] }, user('second')],
+        }),
+      ),
+    )
+    expect(sessionIdOf(second.text)).not.toBe(sessionIdOf(first.text))
+  })
+
+  test('a cancelled turn keeps the session usable for the next turn', async () => {
+    const { adapter } = makeAdapter('hang-once', { structuredEvents: false }, fakeSessionServices)
+    const ac = new AbortController()
+    const first = collect(adapter.stream(opts({ sessionId: 's', messages: [user('first')], signal: ac.signal })))
+    await Bun.sleep(150)
+    ac.abort()
+    const aborted = await first
+    expect(aborted.finish?.kind).toBe('aborted')
+
+    const second = await collect(
+      adapter.stream(
+        opts({
+          sessionId: 's',
+          messages: [user('first'), { role: 'assistant', content: [{ type: 'text', text: aborted.text }] }, user('second')],
+        }),
+      ),
+    )
+    expect(second.text).toContain('[echo:second]')
+    expect(sessionIdOf(second.text)).toBe(sessionIdOf(aborted.text))
   })
 })

@@ -14,8 +14,21 @@ import { createLogger } from './log.js'
 
 export { Config }
 export { AgyAcpAdapter } from './adapter.js'
+export { AcpAgentBackendImpl } from './acp-backend.js'
 export { AcpProcess } from './acp-process.js'
+export { SessionContinuity } from './continuity.js'
+export { translateUpdate } from './events.js'
+export { buildDeltaBlocks, buildPromptBlocks } from './prompt.js'
 export { DEFAULT_CONFIG, resolveConfig, type AgyConfig, type Config as AgyAcpConfig } from './config.js'
+export type {
+  AcpAgentBackend,
+  AcpCapabilities,
+  AgentPermissionRequest,
+  AgentSession,
+  AgentSessionHandlers,
+  AgentStopReason,
+  AgentUpdate,
+} from './backend.js'
 
 export const name = 'agy-acp'
 export const inject = ['llm']
@@ -26,6 +39,14 @@ export const PROVIDER = 'antigravity'
 export function apply(ctx: Context, config: ConfigType): void {
   const resolved = resolveConfig(config) // throws ConfigError => plugin fails to load, clearly
   const log = createLogger({ debug: resolved.debug, logFile: resolved.logFile })
+  if (resolved.sessionMode === 'default') {
+    // Observed on agy 1.5.x: native mode can write files without sending `session/request_permission`, so dsh's
+    // approval seam cannot govern those writes. Keep the warning visible at load time; `plan` remains the default.
+    log.warn(
+      'sessionMode "default" is Antigravity native mode: file writes may bypass ACP permission requests. ' +
+        'Keep "plan" unless you accept that.',
+    )
+  }
   const proc = new AcpProcess(resolved, log)
   const adapter = new AgyAcpAdapter(ctx, resolved, proc, log)
 
@@ -50,7 +71,7 @@ export function apply(ctx: Context, config: ConfigType): void {
     log.warn('could not declare the configurable provider', { message: (e as Error)?.message })
   }
 
-  // 3) Unload: unregister, cancel in-flight work, terminate the subprocess.
+  // 3) Unload: unregister, close persistent ACP sessions, terminate the subprocess.
   ctx.effect(
     () => () => {
       try {
@@ -63,7 +84,7 @@ export function apply(ctx: Context, config: ConfigType): void {
       } catch {
         /* already released */
       }
-      void proc.dispose()
+      void adapter.dispose()
     },
     'agy-acp',
   )

@@ -46,6 +46,26 @@ export interface AgyConfig {
   readonly toolActivity: ToolActivity
   /** How long a discovered model catalog is reused before asking `agy acp` again. */
   readonly modelsRefreshMs: number
+  /**
+   * Reuse one ACP session per dsh session across turns instead of creating a fresh session and replaying the
+   * transcript on every model call. Default `true`; the fallback path is always a full replay, never a failure.
+   */
+  readonly sessionContinuity: boolean
+  /**
+   * After a subprocess crash or idle stop, try `session/load` / `session/resume` before replaying. Only attempted
+   * when the agent advertises the capability; a failure falls back to a fresh session + replay.
+   */
+  readonly resumeSessions: boolean
+  /** Maximum persistent ACP sessions kept alive. Least-recently-used idle sessions are closed. `0` disables the cap. */
+  readonly maxSessions: number
+  /** Close a persistent ACP session after this long without a turn. `0` disables idle cleanup. */
+  readonly sessionIdleTimeoutMs: number
+  /** Record structured ACP tool/session lifecycle events as `plugin:agy-acp/*` session records. */
+  readonly structuredEvents: boolean
+  /** Send image prompt blocks when the agent advertises `promptCapabilities.image`. */
+  readonly imageInput: boolean
+  /** Log a warning when prompt content cannot be represented (image/file/unsupported block). */
+  readonly warnOnUnsupportedContent: boolean
 }
 
 export const DEFAULT_CONFIG: AgyConfig = {
@@ -59,6 +79,13 @@ export const DEFAULT_CONFIG: AgyConfig = {
   debug: false,
   toolActivity: 'text',
   modelsRefreshMs: 60_000,
+  sessionContinuity: true,
+  resumeSessions: true,
+  maxSessions: 8,
+  sessionIdleTimeoutMs: 900_000,
+  structuredEvents: true,
+  imageInput: true,
+  warnOnUnsupportedContent: true,
 }
 
 /** The cordis config schema. Every field has a default so an empty config is valid. */
@@ -76,6 +103,13 @@ export const Config: Schemastery<Config> = z.object({
   logFile: z.string().default(''),
   toolActivity: z.union(['text', 'hidden']).default(DEFAULT_CONFIG.toolActivity),
   modelsRefreshMs: z.number().default(DEFAULT_CONFIG.modelsRefreshMs),
+  sessionContinuity: z.boolean().default(DEFAULT_CONFIG.sessionContinuity),
+  resumeSessions: z.boolean().default(DEFAULT_CONFIG.resumeSessions),
+  maxSessions: z.number().default(DEFAULT_CONFIG.maxSessions),
+  sessionIdleTimeoutMs: z.number().default(DEFAULT_CONFIG.sessionIdleTimeoutMs),
+  structuredEvents: z.boolean().default(DEFAULT_CONFIG.structuredEvents),
+  imageInput: z.boolean().default(DEFAULT_CONFIG.imageInput),
+  warnOnUnsupportedContent: z.boolean().default(DEFAULT_CONFIG.warnOnUnsupportedContent),
 })
 
 /**
@@ -151,6 +185,13 @@ export function resolveConfig(input?: Partial<Config>): AgyConfig {
     logFile,
     toolActivity: raw.toolActivity,
     modelsRefreshMs: finiteNumber(raw.modelsRefreshMs, 'modelsRefreshMs', 0),
+    sessionContinuity: raw.sessionContinuity !== false,
+    resumeSessions: raw.resumeSessions !== false,
+    maxSessions: finiteNumber(raw.maxSessions, 'maxSessions', 0),
+    sessionIdleTimeoutMs: finiteNumber(raw.sessionIdleTimeoutMs, 'sessionIdleTimeoutMs', 0),
+    structuredEvents: raw.structuredEvents !== false,
+    imageInput: raw.imageInput !== false,
+    warnOnUnsupportedContent: raw.warnOnUnsupportedContent !== false,
   }
 }
 

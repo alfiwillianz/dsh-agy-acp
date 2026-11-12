@@ -11,6 +11,13 @@ describe('resolveConfig', () => {
     expect(config.sessionMode).toBe('plan')
     expect(config.toolActivity).toBe('text')
     expect(config.logFile).toBeUndefined()
+    expect(config.sessionContinuity).toBe(true)
+    expect(config.resumeSessions).toBe(true)
+    expect(config.maxSessions).toBe(8)
+    expect(config.sessionIdleTimeoutMs).toBe(900_000)
+    expect(config.structuredEvents).toBe(true)
+    expect(config.imageInput).toBe(true)
+    expect(config.warnOnUnsupportedContent).toBe(true)
   })
 
   test('trims the executable and normalizes an empty log file', () => {
@@ -53,5 +60,7 @@ describe('resolveConfig', () => {
     expect(() => resolveConfig({ ...DEFAULT_CONFIG, requestTimeoutMs: -1 })).toThrow(ConfigError)
     expect(() => resolveConfig({ ...DEFAULT_CONFIG, idleTimeoutMs: -1 })).toThrow(ConfigError)
     expect(() => resolveConfig({ ...DEFAULT_CONFIG, modelsRefreshMs: -1 })).toThrow(ConfigError)
+    expect(() => resolveConfig({ ...DEFAULT_CONFIG, maxSessions: -1 })).toThrow(ConfigError)
+    expect(() => resolveConfig({ ...DEFAULT_CONFIG, sessionIdleTimeoutMs: -1 })).toThrow(ConfigError)
   })
 })
