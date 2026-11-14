@@ -2,8 +2,8 @@
 
 Scope: everything in this directory except third-party `node_modules/` (source, tests, config, docs, lockfile).
 Method: (1) keyword search for every credential-related term plus variants, (2) a behavioural search of `src/` for
-every filesystem / environment / network / process API, (3) live experiments against the real `agy` 1.5.3 and dsh
-0.2.2-rc.1.
+every filesystem / environment / network / process API, (3) live experiments against the real `agy` 1.5.9 (originally
+1.5.3) and dsh 0.2.2-rc.1.
 
 **Conclusion:** the plugin contains no code that reads, copies, parses, exports, refreshes, stores or transmits Google
 credentials, implements OAuth, proxies any API, or contacts any network endpoint. Every keyword hit below is either a
@@ -49,14 +49,16 @@ described below.
 
 ## 3. Behaviour verified (live or by test)
 
-The first rows were verified live against `agy` 1.5.3 and dsh 0.2.2-rc.1 before the persistent-session change. Rows
+The first rows were verified live against `agy` 1.5.3 and dsh 0.2.2-rc.1 before the persistent-session change; the
+model-catalog and new-model rows were re-verified live on `agy` 1.5.9. Rows
 marked "verified by test" were added with the new backend/continuity/permission tests and have not yet been re-run
 against a live `agy`; re-run `bun scripts/live-prompt.mjs` twice in one dsh session to exercise the persistent path.
 
 | Check | Outcome |
 |---|---|
-| Server's model list includes Claude / GPT-OSS entries | Not exposed; only the 2 Gemini families (3 thinking levels) were registered. |
-| Live discovery | `session/new` reported 13 advertised models; the adapter exposed `gemini-4-argon` and `gemini-3.8-flash` with `low`/`medium`/`high`. |
+| Server's model list includes Claude / GPT-OSS entries | Not exposed; only the 4 Gemini families (3 thinking levels, plus `xhigh` on Hydrogen) were registered. |
+| Live discovery | `session/new` reported 18 advertised models; the adapter exposed `gemini-4-argon`, `gemini-4-hydrogen`, `gemini-pro-orchestrator-g1-pro`, and `gemini-3.8-flash` with `low`/`medium`/`high` (`xhigh` on Hydrogen). |
+| Live prompt (new models) | `gemini-4-hydrogen` at `xhigh`, `gemini-pro-orchestrator-g1-pro`, and `gemini-4-hydrogen` at `low` each streamed a reply and finished with `stop`. |
 | Live prompt | `"Say hi in one short sentence."` streamed `"Hi there, how can I help you today?"` and finished with `stop`. |
 | dsh approval allowed | ACP `session/request_permission` was forwarded to `ctx.approval.request`; `allowed-once` selected `allow_once`. |
 | dsh approval denied | A rejection selected `reject_once`; the tool call failed. |

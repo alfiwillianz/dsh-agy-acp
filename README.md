@@ -26,8 +26,10 @@ dsh agent loop ──► this plugin (LlmAdapter compatibility surface)
 - **Negotiates ACP capabilities** from `initialize` and only uses what the agent advertises: `session/load`,
   `session/resume`, `session/close`, image prompts, embedded context, and notices/compaction updates.
 - Discovers models from the server's own `session/new` response and exposes **only the Gemini models it reports**, one
-  model per family, with the server's thinking levels as dsh **reasoning efforts** (`low` / `medium` / `high`). The
-  server also lists Claude / GPT-OSS entries; they are deliberately not exposed.
+  model per family, with the server's thinking levels as dsh **reasoning efforts** (`low` / `medium` / `high`, plus
+  `xhigh` — "Extra High" — where the server advertises it, as Gemini 4 Hydrogen does). The server also lists Claude
+  and GPT-OSS entries; they are deliberately not exposed: this integration only uses Google's own models through
+  `agy`, and partner models are outside its supported path.
 - Streams text and reasoning, and shows Antigravity's own tool activity as compact text lines in the transcript
   (dsh has no provider-executed tool concept; see [Limitations](#limitations-read-these)). Structured tool, plan,
   notice, usage, and session events are also recorded as `plugin:agy-acp/*` session records.
@@ -134,9 +136,15 @@ cd ~/.dsh/profiles/dsh-tui && pnpm install
 Then restart dsh (or let the profile HMR reload). Pick a model in the model picker:
 
 ```
-Antigravity (Gemini via ACP) → Gemini 4 Argon   (reasoning: low / medium / high)
-Antigravity (Gemini via ACP) → Gemini 3.8 Flash (reasoning: low / medium / high)
+Antigravity (Gemini via ACP) → Gemini 4 Argon       (reasoning: low / medium / high)
+Antigravity (Gemini via ACP) → Gemini 4 Hydrogen    (reasoning: low / medium / high / Extra High)
+Antigravity (Gemini via ACP) → Orchestrator (Argon) (fixed configuration, no reasoning effort)
+Antigravity (Gemini via ACP) → Gemini 3.8 Flash     (reasoning: low / medium / high)
 ```
+
+The list is whatever your plan's `agy acp` reports (for example, Gemini 4 Carbon appears on Google AI Ultra), so it
+can grow between CLI releases without a plugin update. Orchestrator is a fixed two-model configuration (a planner
+plus Gemini 4 Hydrogen) and the server reports no thinking levels for it, so dsh shows no reasoning selector.
 
 The provider is registered by the plugin row `agy-acp`. To tune it, override that row's config in the profile's own
 `cordis.patch.yml` (do **not** insert a second same-id row):
@@ -294,14 +302,18 @@ Additional hardening:
 5. **Auxiliary calls are ephemeral.** Title generation, compaction, and any call without a dsh session id open a
    fresh ACP session and close it afterwards, so they do not share the main conversation.
 6. **Limits and usage are not reported by ACP.** Context/output limits come from a table of Google's published figures
-   (1,048,576 / 65,536; `FAMILY_LIMITS` in `src/models.ts`, may be lower on your plan); unknown families use dsh's
-   defaults. ACP `usage_update` reports context usage, not input/output token counts; it is recorded but not emitted
-   as dsh `TokenUsage`, so dsh's token meter estimates it.
+   (1,048,576 / 65,536 for Gemini 4 Argon, Gemini 4 Hydrogen, and Gemini 3.8 Flash; `FAMILY_LIMITS` in
+   `src/models.ts`, may be lower on your plan). Orchestrator and unknown families use dsh's defaults. ACP
+   `usage_update` reports context usage, not input/output token counts; it is recorded but not emitted as dsh
+   `TokenUsage`, so dsh's token meter estimates it.
 7. **Pending dsh approval on cancel.** If a turn is cancelled while a dsh approval prompt is open, the ACP side is
    released immediately and a late answer is discarded, but the prompt may remain visible until answered.
-8. **Models are families** (`gemini-4-argon`, `gemini-3.8-flash`); reasoning efforts `low|medium|high` map to the
-   server's `thought_level`. Both are applied via the stable `session/set_config_option` (`model`, `thought_level`,
-   `mode`). If a model cannot be selected, the call errors instead of silently using another model.
+8. **Models are families** (`gemini-4-argon`, `gemini-4-hydrogen`, `gemini-pro-orchestrator-g1-pro`,
+   `gemini-3.8-flash`); reasoning efforts `low|medium|high|xhigh` map to the server's `thought_level`. A level is
+   accepted when the server's `thought_level` select lists it **or** when the catalog advertises it through a
+   `<family>-<level>` model id — Gemini 4 Hydrogen advertises `xhigh` that way while the select still lists only
+   low/medium/high. Both are applied via the stable `session/set_config_option` (`model`, `thought_level`, `mode`).
+   If a model cannot be selected, the call errors instead of silently using another model.
 9. **The generic backend is not yet a generic plugin.** `AcpAgentBackendImpl` and `SessionContinuity` are
    Antigravity-agnostic, but the provider route, Gemini filtering, family collapsing, and config-option handling are
    Antigravity-specific. Another ACP agent needs its own adapter and provider registration.
@@ -313,14 +325,15 @@ Additional hardening:
 | Component | Version |
 |---|---|
 | dsh | `0.2.2-rc.1` (cordis plugin API: `name` / `inject` / `Config` / `apply`; `ctx.llm.registerAdapter`) |
-| Antigravity CLI | `agy` 1.5.3 — `agy acp`, ACP protocol v1, agent name "Antigravity ACP Server" (original plugin tested 1.5.2) |
+| Antigravity CLI | `agy` 1.5.9 — `agy acp`, ACP protocol v1, agent name "Antigravity ACP Server" (earlier: 1.5.3, 1.5.2) |
 | `@agentclientprotocol/sdk` | 2.4.0 (v1 stable entrypoint; client API `client().onRequest().connect()`) |
 | dsh packages | `@deepseek-ai/dsh-llm`, `dsh-agent`, `dsh-session` (plugin records), `dsh-user-approval`, `dsh-working-directory` 0.2.2-rc.1; `dsh-attachment` is optional (multimodal input/output) |
 | Runtime / OS | Node 26.13.0, Bun 1.4.4 (tests), Linux (CachyOS) |
 
-Verified live on this machine (before the continuity change): model discovery (2 Gemini families, 3 thinking levels),
-model + reasoning-effort selection, a real streamed Gemini response (`"Say hi in one short sentence."` → `"Hi there,
-how can I help you today?"`, finish `stop`), and clean subprocess exit. The persistent-session path is verified against
+Verified live on this machine: model discovery (4 Gemini families, `low`/`medium`/`high` plus `xhigh` on Hydrogen),
+model + reasoning-effort selection, real streamed Gemini responses (`"Say hi in one short sentence."` → `"Hi there,
+how can I help you today?"`, finish `stop`; Hydrogen at `xhigh` and Orchestrator both answered `"OK"` to a direct
+prompt), and clean subprocess exit. The persistent-session path is verified against
 the mock ACP server, not yet against a live `agy`; run `bun scripts/live-prompt.mjs` (two turns in one ACP session) to
 confirm the second turn reuses the session. Not verified: Windows/macOS, and the dsh TUI model picker end-to-end
 (the adapter is exercised directly).
@@ -331,12 +344,13 @@ confirm the second turn reuses the session. Not verified: Windows/macOS, and the
 bun test
 ```
 
-147 tests against a mock ACP server (`test/mock-agent.ts`, real SDK on the agent side), no Google credentials or
+152 tests against a mock ACP server (`test/mock-agent.ts`, real SDK on the agent side), no Google credentials or
 network required. Coverage: process startup, initialization, capability normalization, session creation, streaming,
 tool-call updates, permission approval/denial/fail-closed, `reject` short-circuit, `callId` forwarding, stale
 permission rejection, cancellation (incl. agents that ignore it), unexpected termination + reconnect, `session/load`
 and `session/resume`, malformed responses, missing CLI, unsupported ACP command, concurrent sessions, idle shutdown,
-disposal, model discovery and family collapsing, prompt building, multimodal prompt blocks, persistent session reuse
+disposal, model discovery and family collapsing (incl. `xhigh` levels the `thought_level` select omits), prompt
+building, multimodal prompt blocks, persistent session reuse
 and delta prompts, divergence replay, crash recovery and resume fallback, eviction, config validation, and the full
 `LlmAdapter` → `StreamChunk` path.
 
@@ -353,3 +367,8 @@ bun scripts/live-prompt.mjs  # two real Gemini turns in one ACP session (continu
 Using the documented ACP interface of the official `agy` binary is **protocol compatibility**. It is not a claim that
 Google has reviewed or approved this plugin, and it says nothing about whether your Antigravity plan's terms permit use
 through third-party clients. Check Google's current terms for your account type before relying on it.
+
+**Only Google models are ever selected.** The plugin filters the server's catalog to Gemini entries and always sets the
+model explicitly on every session, so a request can never silently fall through to a partner model (Claude, GPT-OSS)
+that `agy` also lists. If you believe using partner models through `agy` is restricted on your account, this
+integration stays on the supported Google-only path.

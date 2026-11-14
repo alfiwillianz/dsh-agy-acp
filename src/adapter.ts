@@ -24,7 +24,15 @@ import { createAttachmentResolver } from './attachments.js'
 import { planText, translateUpdate } from './events.js'
 import { describeError } from './turn.js'
 import type { Logger } from './log.js'
-import { configStepsForModel, knownLimits, modeStep, orderThinkingLevels, thoughtLevelStep, type ModelFamily } from './models.js'
+import {
+  advertisedLevelsFor,
+  configStepsForModel,
+  knownLimits,
+  modeStep,
+  orderThinkingLevels,
+  thoughtLevelStep,
+  type ModelFamily,
+} from './models.js'
 import { chooseOutcome, describeToolCall, type AcpOutcome, type PermissionOptionLike } from './permission.js'
 import { buildPrompt, type MessageLike } from './prompt.js'
 import { recordAcpSession, recordAcpTool, recordAcpUpdate } from './records.js'
@@ -80,9 +88,12 @@ function mapStop(reason: StopReason, aborted: boolean): FinishReason {
   return { kind: 'stop' }
 }
 
+/** Display names for thinking levels whose id is not self-explanatory (`xhigh` is Hydrogen's "Extra" level). */
+const EFFORT_NAMES: Readonly<Record<string, string>> = { xhigh: 'Extra High' }
+
 function effortName(level: string): string {
   if (level === '') return level
-  return level.charAt(0).toUpperCase() + level.slice(1)
+  return EFFORT_NAMES[level] ?? level.charAt(0).toUpperCase() + level.slice(1)
 }
 
 function truncate(text: string, max = 600): string {
@@ -616,7 +627,8 @@ export class AgyAcpAdapter extends LlmAdapter {
       return
     }
 
-    const steps = configStepsForModel(options.model, configOptions)
+    const levels = advertisedLevelsFor(response, options.model)
+    const steps = configStepsForModel(options.model, configOptions, levels)
     const current = (response.models as { currentModelId?: unknown } | undefined)?.currentModelId
     if (steps.length === 0 && current !== options.model) {
       throw new AgyError(
@@ -627,7 +639,7 @@ export class AgyAcpAdapter extends LlmAdapter {
 
     // Reasoning effort (dsh) => the server's thinking level. Unset keeps the server's own default.
     if (options.reasoningEffort) {
-      const level = thoughtLevelStep(options.reasoningEffort, configOptions)
+      const level = thoughtLevelStep(options.reasoningEffort, configOptions, levels)
       await session.setConfigOption(level.configId, level.value)
     }
 

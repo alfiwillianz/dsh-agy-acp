@@ -1,7 +1,14 @@
 import type { AcpProcess, PermissionRequest, SessionUpdate, StopReason } from './acp-process.js'
 import type { AgyConfig } from './config.js'
 import { AgyError, errorCode } from './errors.js'
-import { configStepsForModel, extractGeminiFamilies, modeStep, thoughtLevelStep, type ModelFamily } from './models.js'
+import {
+  advertisedLevelsFor,
+  configStepsForModel,
+  extractGeminiFamilies,
+  modeStep,
+  thoughtLevelStep,
+  type ModelFamily,
+} from './models.js'
 import { chooseOutcome } from './permission.js'
 
 /** Provider-neutral frames produced by one Antigravity prompt turn. The adapter turns them into `StreamChunk`s. */
@@ -134,7 +141,8 @@ export async function runTurn(
     })
 
     // Select the requested model through the server's own config options. Never silently fall back to another model.
-    const steps = configStepsForModel(input.model, session.response.configOptions)
+    const levels = advertisedLevelsFor(session.response, input.model)
+    const steps = configStepsForModel(input.model, session.response.configOptions, levels)
     const current = (session.response.models as { currentModelId?: unknown } | undefined)?.currentModelId
     if (steps.length === 0 && current !== input.model) {
       throw new AgyError(
@@ -145,7 +153,7 @@ export async function runTurn(
 
     // Reasoning effort (dsh) => the server's thinking level. Unset keeps the server's own default.
     if (input.thoughtLevel) {
-      const level = thoughtLevelStep(input.thoughtLevel, session.response.configOptions)
+      const level = thoughtLevelStep(input.thoughtLevel, session.response.configOptions, levels)
       await session.setConfigOption(level.configId, level.value)
     }
 

@@ -77,6 +77,8 @@ describe("sessions and streaming", () => {
     expect(s.sessionId).toMatch(/^mock-/)
     const ids = ((s.response.models as { availableModels: Array<{ modelId: string }> }).availableModels).map((m) => m.modelId)
     expect(ids).toContain("gemini-4-argon-medium")
+    expect(ids).toContain("gemini-4-hydrogen-xhigh")
+    expect(ids).toContain("gemini-pro-orchestrator-g1-pro")
     await s.close()
   })
 

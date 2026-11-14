@@ -83,7 +83,12 @@ describe('model catalog', () => {
   test('lists only the Gemini families the server reports, with their thinking levels', async () => {
     const { adapter } = makeAdapter()
     const models = await adapter.listModels('antigravity')
-    expect(models.map((m) => m.id)).toEqual(['gemini-4-argon', 'gemini-3.8-flash'])
+    expect(models.map((m) => m.id)).toEqual([
+      'gemini-4-argon',
+      'gemini-4-hydrogen',
+      'gemini-pro-orchestrator-g1-pro',
+      'gemini-3.8-flash',
+    ])
     expect(models.every((m) => m.provider === 'antigravity')).toBe(true)
     expect(models.every((m) => m.inputModalities?.join() === 'text')).toBe(true)
   })
@@ -98,6 +103,29 @@ describe('model catalog', () => {
     expect(info.reasoning?.efforts.map((e) => e.id)).toEqual(['medium', 'high'])
   })
 
+  test('exposes Hydrogen xhigh as the highest reasoning effort', async () => {
+    const { adapter } = makeAdapter()
+    const info = await adapter.resolveModel('antigravity', 'gemini-4-hydrogen')
+    expect(info.name).toBe('Gemini 4 Hydrogen')
+    expect(info.context).toEqual({ contextWindow: 1_048_576 })
+    expect(info.defaultMaxTokens).toBe(65_536)
+    expect(info.reasoning?.efforts).toEqual([
+      { id: 'low', name: 'Low' },
+      { id: 'medium', name: 'Medium' },
+      { id: 'high', name: 'High' },
+      { id: 'xhigh', name: 'Extra High' },
+    ])
+  })
+
+  test('Orchestrator is exposed as a single fixed model with no reasoning effort', async () => {
+    const { adapter } = makeAdapter()
+    const info = await adapter.resolveModel('antigravity', 'gemini-pro-orchestrator-g1-pro')
+    expect(info.name).toBe('Orchestrator (Argon)')
+    expect(info.context).toBeUndefined()
+    expect(info.defaultMaxTokens).toBeUndefined()
+    expect(info.reasoning).toBeUndefined()
+  })
+
   test('a missing CLI yields an empty catalog instead of throwing', async () => {
     const { adapter } = makeAdapter('', { command: '/nonexistent/definitely-not-agy' })
     expect(await adapter.listModels('antigravity')).toEqual([])
@@ -110,6 +138,15 @@ describe('model catalog', () => {
 })
 
 describe('streaming', () => {
+  test('applies an advertised xhigh effort through thought_level', async () => {
+    const { adapter } = makeAdapter()
+    const { text, finish } = await collect(
+      adapter.stream(opts({ model: 'gemini-4-hydrogen', reasoningEffort: 'xhigh' })),
+    )
+    expect(text).toContain('[model:gemini-4-hydrogen+xhigh]')
+    expect(finish).toEqual({ kind: 'stop' })
+  })
+
   test('streams text, reasoning and tool activity, then a stop finish', async () => {
     const { adapter } = makeAdapter()
     const { chunks, text, reasoning, finish } = await collect(adapter.stream(opts()))

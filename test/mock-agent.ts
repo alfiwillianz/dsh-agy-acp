@@ -41,6 +41,11 @@ if (flags.has("secret-stderr")) process.stderr.write("debug: Authorization: Bear
 const MODELS = [
   { modelId: "gemini-4-argon-medium", name: "Gemini 4 Argon (Medium)" },
   { modelId: "gemini-4-argon-high", name: "Gemini 4 Argon (High)" },
+  { modelId: "gemini-4-hydrogen-high", name: "Gemini 4 Hydrogen (High)" },
+  { modelId: "gemini-4-hydrogen-xhigh", name: "Gemini 4 Hydrogen (XHigh)" },
+  { modelId: "gemini-4-hydrogen-medium", name: "Gemini 4 Hydrogen (Medium)" },
+  { modelId: "gemini-4-hydrogen-low", name: "Gemini 4 Hydrogen (Low)" },
+  { modelId: "gemini-pro-orchestrator-g1-pro", name: "Orchestrator (Argon)" },
   { modelId: "gemini-3.8-flash-low", name: "Gemini 3.8 Flash (Low)" },
   { modelId: "claude-sonnet-5-5-medium", name: "Claude Sonnet 5.5 (Medium)" },
   { modelId: "gpt-oss-120b-medium", name: "GPT-OSS 120B (Medium)" },
@@ -53,7 +58,13 @@ const CONFIG_OPTIONS = [
   ...(flags.has("no-mode") ? [] : [MODE_OPTION]),
   {
     id: "model", name: "Model", category: "model", type: "select", currentValue: "gemini-4-argon",
-    options: [{ value: "gemini-4-argon", name: "Gemini 4 Argon" }, { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" }, { value: "claude-sonnet-5-5", name: "Claude" }],
+    options: [
+      { value: "gemini-4-argon", name: "Gemini 4 Argon" },
+      { value: "gemini-4-hydrogen", name: "Gemini 4 Hydrogen" },
+      { value: "gemini-pro-orchestrator-g1-pro", name: "Orchestrator (Argon)" },
+      { value: "gemini-3.8-flash", name: "Gemini 3.8 Flash" },
+      { value: "claude-sonnet-5-5", name: "Claude" },
+    ],
   },
   {
     id: "thought_level", name: "Thinking", category: "thought_level", type: "select", currentValue: "medium",

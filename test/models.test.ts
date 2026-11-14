@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
+  advertisedLevelsFor,
   configStepsForModel,
   extractGeminiFamilies,
   extractGeminiModels,
@@ -29,6 +30,8 @@ const CONFIG_OPTIONS = [
     currentValue: 'gemini-4-argon',
     options: [
       { value: 'gemini-4-argon', name: 'Gemini 4 Argon' },
+      { value: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen' },
+      { value: 'gemini-pro-orchestrator-g1-pro', name: 'Orchestrator (Argon)' },
       { value: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash' },
       { value: 'claude-sonnet-5-5', name: 'Claude' },
     ],
@@ -51,6 +54,10 @@ const SESSION_RESPONSE = {
     availableModels: [
       { modelId: 'gemini-4-argon-medium', name: 'Gemini 4 Argon (Medium)' },
       { modelId: 'gemini-4-argon-high', name: 'Gemini 4 Argon (High)' },
+      { modelId: 'gemini-4-hydrogen-high', name: 'Gemini 4 Hydrogen (High)' },
+      { modelId: 'gemini-4-hydrogen-xhigh', name: 'Gemini 4 Hydrogen (XHigh)' },
+      { modelId: 'gemini-4-hydrogen-low', name: 'Gemini 4 Hydrogen (Low)' },
+      { modelId: 'gemini-pro-orchestrator-g1-pro', name: 'Orchestrator (Argon)' },
       { modelId: 'gemini-3.8-flash-low', name: 'Gemini 3.8 Flash (Low)' },
       { modelId: 'claude-sonnet-5-5-medium', name: 'Claude Sonnet 5.5 (Medium)' },
       { modelId: 'gpt-oss-120b-medium', name: 'GPT-OSS 120B (Medium)' },
@@ -94,8 +101,19 @@ describe('family discovery', () => {
     const families = extractGeminiFamilies(SESSION_RESPONSE)
     expect(families).toEqual([
       { id: 'gemini-4-argon', name: 'Gemini 4 Argon', levels: ['medium', 'high'] },
+      { id: 'gemini-4-hydrogen', name: 'Gemini 4 Hydrogen', levels: ['high', 'xhigh', 'low'] },
+      { id: 'gemini-pro-orchestrator-g1-pro', name: 'Orchestrator (Argon)', levels: [] },
       { id: 'gemini-3.8-flash', name: 'Gemini 3.8 Flash', levels: ['low'] },
     ])
+  })
+
+  test('keeps a level the thought_level select omits but the catalog advertises', () => {
+    const hydrogen = extractGeminiFamilies(SESSION_RESPONSE).find((f) => f.id === 'gemini-4-hydrogen')
+    expect(hydrogen?.levels).toContain('xhigh')
+    expect(advertisedLevelsFor(SESSION_RESPONSE, 'gemini-4-hydrogen')).toEqual(['high', 'xhigh', 'low'])
+    expect(advertisedLevelsFor(SESSION_RESPONSE, 'gemini-4-hydrogen-xhigh')).toEqual(['high', 'xhigh', 'low'])
+    expect(advertisedLevelsFor(SESSION_RESPONSE, 'gemini-pro-orchestrator-g1-pro')).toEqual([])
+    expect(advertisedLevelsFor(SESSION_RESPONSE, 'gemini-unknown')).toEqual([])
   })
 
   test('keeps a model that cannot be decomposed as a standalone entry', () => {
@@ -122,6 +140,16 @@ describe('config steps', () => {
     ])
   })
 
+  test('applies an advertised level the select omits only when the catalog confirms it', () => {
+    expect(configStepsForModel('gemini-4-hydrogen-xhigh', CONFIG_OPTIONS)).toEqual([
+      { configId: 'model', value: 'gemini-4-hydrogen' },
+    ])
+    expect(configStepsForModel('gemini-4-hydrogen-xhigh', CONFIG_OPTIONS, ['high', 'xhigh'])).toEqual([
+      { configId: 'model', value: 'gemini-4-hydrogen' },
+      { configId: 'thought_level', value: 'xhigh' },
+    ])
+  })
+
   test('selects an exact model id verbatim when the server lists it', () => {
     expect(configStepsForModel('gemini-3.8-flash', CONFIG_OPTIONS)).toEqual([
       { configId: 'model', value: 'gemini-3.8-flash' },
@@ -133,10 +161,16 @@ describe('config steps', () => {
     expect(configStepsForModel('gemini-4-argon', undefined)).toEqual([])
   })
 
-  test('thoughtLevelStep validates against the server option', () => {
+  test('thoughtLevelStep validates against the server option and the advertised catalog', () => {
     expect(thoughtLevelStep('low', CONFIG_OPTIONS)).toEqual({ configId: 'thought_level', value: 'low' })
     expect(() => thoughtLevelStep('ultra', CONFIG_OPTIONS)).toThrow(/does not offer thinking level/)
     expect(() => thoughtLevelStep('low', [])).toThrow(/does not offer thinking level/)
+    // `xhigh` is not in the select, but Hydrogen advertises it through its model ids.
+    expect(() => thoughtLevelStep('xhigh', CONFIG_OPTIONS)).toThrow(/does not offer thinking level/)
+    expect(thoughtLevelStep('xhigh', CONFIG_OPTIONS, ['high', 'xhigh', 'low'])).toEqual({
+      configId: 'thought_level',
+      value: 'xhigh',
+    })
   })
 
   test('modeStep enforces plan and skips default', () => {
@@ -147,12 +181,16 @@ describe('config steps', () => {
 
   test('knownLimits only answers for published families', () => {
     expect(knownLimits('gemini-4-argon')).toEqual({ context: 1_048_576, output: 65_536 })
+    expect(knownLimits('gemini-4-hydrogen')).toEqual({ context: 1_048_576, output: 65_536 })
     expect(knownLimits('gemini-3.8-flash-low')).toEqual({ context: 1_048_576, output: 65_536 })
+    // Orchestrator is a fixed two-model configuration; Google publishes no per-model limits for it.
+    expect(knownLimits('gemini-pro-orchestrator-g1-pro')).toBeUndefined()
     expect(knownLimits('gemini-unknown')).toBeUndefined()
   })
 
   test('thinking levels are ordered least to greatest', () => {
     expect(orderThinkingLevels(['high', 'low', 'medium'])).toEqual(['low', 'medium', 'high'])
+    expect(orderThinkingLevels(['xhigh', 'high', 'low', 'medium'])).toEqual(['low', 'medium', 'high', 'xhigh'])
     expect(orderThinkingLevels(['high', 'ultra', 'low'])).toEqual(['low', 'high', 'ultra'])
     expect(orderThinkingLevels([])).toEqual([])
   })
