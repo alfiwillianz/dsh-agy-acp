@@ -1,5 +1,8 @@
 # dsh-agy-acp (experimental)
 
+> [!WARNING]
+> **Archived.** This repository is no longer maintained. It targeted **DSH (DeepSeek Harness)**, which is no longer in use, so the plugin is kept for historical reference only. No further releases, issues, or pull requests will be handled.
+
 A **dsh** plugin that lets dsh talk to Google's official Antigravity ACP server (`agy acp`) and use the **Gemini**
 models it reports.
 
