@@ -1,6 +1,6 @@
 {
   "name": "dsh-agy-acp",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "dsh plugin that exposes Google Antigravity's Gemini models through the official `agy acp` server (Agent Client Protocol), with persistent ACP sessions and a generic ACP backend boundary. Experimental.",
   "type": "module",
   "main": "lib/types/index.js",
