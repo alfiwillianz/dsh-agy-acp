@@ -47,8 +47,13 @@ export function extractGeminiModels(newSessionResponse: unknown): DiscoveredMode
  * per-request output cap. These are Gemini *API* figures; Antigravity plan tiers may enforce lower caps. Families
  * not listed return undefined (dsh's default applies) — notably Orchestrator, a fixed two-model configuration
  * (planner + Hydrogen) for which Google publishes no separate limits.
+ *
+ * Gemini 4 Neon is listed with Hydrogen's figures: the ACP server discloses no limits for it and Google's model
+ * page was unreachable when this was added, so treat the entry as the 4.x-family assumption rather than a published
+ * number. Antigravity's own harness shows Neon on a 1.0M-token budget, which is consistent with it.
  */
 const FAMILY_LIMITS: ReadonlyArray<readonly [prefix: string, limits: { context: number; output: number }]> = [
+  ['gemini-4-neon', { context: 1_048_576, output: 65_536 }],
   ['gemini-4-argon', { context: 1_048_576, output: 65_536 }],
   ['gemini-4-hydrogen', { context: 1_048_576, output: 65_536 }],
   ['gemini-3.8-flash', { context: 1_048_576, output: 65_536 }],
